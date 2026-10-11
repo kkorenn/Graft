@@ -1,0 +1,7 @@
+{
+	"required": true,
+	"package": "dev.graft.v1_21_11.mixin",
+	"compatibilityLevel": "JAVA_21",
+	"client": ["RenderSystemMixin", "WindowMixin", "MainTargetAccessor", "RenderScaleMixin", "OptionsSubScreenAccessor", "VideoSettingsMixin"],
+	"injectors": { "defaultRequire": 1 }
+}

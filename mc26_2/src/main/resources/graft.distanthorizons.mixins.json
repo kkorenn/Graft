@@ -1,0 +1,8 @@
+{
+	"required": false,
+	"package": "dev.graft.v26_2.compat.distanthorizons",
+	"plugin": "dev.graft.v26_2.compat.CompatMixinPlugin",
+	"compatibilityLevel": "JAVA_25",
+	"client": ["MinecraftRenderWrapperMixin", "DependencySetupMixin"],
+	"injectors": { "defaultRequire": 1 }
+}

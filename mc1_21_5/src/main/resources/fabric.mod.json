@@ -1,0 +1,12 @@
+{
+	"schemaVersion": 1,
+	"id": "graft",
+	"version": "${version}",
+	"name": "Graft",
+	"description": "Native Apple Metal renderer: replaces Minecraft's OpenGL device with Metal.",
+	"license": "MIT",
+	"environment": "client",
+	"icon": "assets/graft/icon.png",
+	"mixins": ["graft.mixins.json"], "breaks": { "metallum": "*", "sodium": "*" },
+	"depends": { "fabricloader": ">=0.19.5", "minecraft": "1.21.5", "java": ">=25" }
+}

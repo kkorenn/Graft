@@ -1,0 +1,8 @@
+{
+	"required": false,
+	"package": "dev.graft.v26_2.compat.sodium",
+	"plugin": "dev.graft.v26_2.compat.CompatMixinPlugin",
+	"compatibilityLevel": "JAVA_25",
+	"client": ["EnumOptionMixin", "DrawBackendMixin", "VKDrawContextMixin", "MojangStagingBufferMixin"],
+	"injectors": { "defaultRequire": 1 }
+}

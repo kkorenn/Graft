@@ -1,0 +1,43 @@
+plugins {
+	id 'gg.essential.loom' version '1.15.50'
+	id 'dev.architectury.architectury-pack200' version '0.1.3'
+}
+
+base.archivesName = 'graft-1.12.2'
+// 1.8.9 Forge runs on Java 8 (LaunchWrapper), so no FFM: Metal is called through JNA, which the game already ships.
+java.toolchain.languageVersion = JavaLanguageVersion.of(8)
+
+loom {
+	forge { pack200Provider.set(new dev.architectury.pack200.java.Pack200Adapter()) }
+	runConfigs.client {
+		property 'fml.coreMods.load', 'dev.graft.legacy.GraftCorePlugin'
+		// ./gradlew :mc1_8_9:runClient -Pquickplay=<save> [-Pbench=metal|vanilla]
+		if (project.hasProperty('quickplay')) property 'graft.world', project.property('quickplay')
+		if (project.hasProperty('bench')) {
+			property 'graft.bench', 'true'
+			property 'graft.disabled', "${project.property('bench') != 'metal'}"
+		}
+	}
+}
+
+dependencies {
+	minecraft 'com.mojang:minecraft:1.12.2'
+	mappings 'de.oceanlabs.mcp:mcp_stable:39-1.12'
+	forge 'net.minecraftforge:forge:1.12.2-14.23.5.2847'
+}
+
+apply from: rootProject.file('mc_legacy_forge/native.gradle')
+
+jar {
+	manifest.attributes(
+		'FMLCorePlugin': 'dev.graft.legacy.GraftCorePlugin',
+		'FMLCorePluginContainsFMLMod': 'true',
+		'ForceLoadAsMod': 'true'
+	)
+}
+
+processResources {
+	def version = project.version
+	inputs.property 'version', version
+	filesMatching('mcmod.info') { expand 'version': version }
+}

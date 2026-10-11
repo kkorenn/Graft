@@ -1,0 +1,29 @@
+plugins { id 'java-library' }
+repositories { mavenCentral() }
+java.toolchain.languageVersion = JavaLanguageVersion.of(25)
+dependencies {
+	compileOnly platform('org.lwjgl:lwjgl-bom:3.3.3') // oldest LWJGL Graft runs on (1.21.x); newer ones keep these APIs
+	compileOnly 'org.lwjgl:lwjgl'
+	compileOnly 'org.lwjgl:lwjgl-shaderc'
+	compileOnly 'org.lwjgl:lwjgl-spvc'
+	compileOnly 'org.slf4j:slf4j-api:2.0.17'
+}
+
+dependencies {
+	testImplementation platform('org.lwjgl:lwjgl-bom:3.4.1')
+	testImplementation 'org.lwjgl:lwjgl'
+	testImplementation 'org.lwjgl:lwjgl-shaderc'
+	testImplementation 'org.lwjgl:lwjgl-spvc'
+	testRuntimeOnly 'org.lwjgl:lwjgl::natives-macos-arm64'
+	testRuntimeOnly 'org.lwjgl:lwjgl-shaderc::natives-macos-arm64'
+	testRuntimeOnly 'org.lwjgl:lwjgl-spvc::natives-macos-arm64'
+}
+
+tasks.register('smokeTest', JavaExec) {
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'dev.graft.metal.MetalSmokeTest'
+	jvmArgs '--enable-native-access=ALL-UNNAMED', '-ea'
+}
+
+// MetalSmokeTest is a main() run by smokeTest, not a JUnit test.
+tasks.named('test') { failOnNoDiscoveredTests = false }

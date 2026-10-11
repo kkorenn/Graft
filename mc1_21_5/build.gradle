@@ -1,0 +1,39 @@
+plugins { id 'net.fabricmc.fabric-loom-remap' version "${loom_version}" }
+
+base.archivesName = 'graft-1.21.5'
+java.toolchain.languageVersion = JavaLanguageVersion.of(25)
+
+dependencies {
+	minecraft "com.mojang:minecraft:1.21.5"
+	mappings loom.officialMojangMappings()
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation project(':core')
+	// 1.21.x ships no shaderc / SPIRV-Cross (26.x does, for its Vulkan backend): bundle them at the game's LWJGL version.
+	for (String module : ['lwjgl-shaderc', 'lwjgl-spvc']) {
+		implementation "org.lwjgl:${module}:3.3.3"
+		include "org.lwjgl:${module}:3.3.3"
+		for (String natives : ['natives-macos-arm64', 'natives-macos']) {
+			runtimeOnly "org.lwjgl:${module}:3.3.3:${natives}"
+			include "org.lwjgl:${module}:3.3.3:${natives}"
+		}
+	}
+}
+
+// 1.21.5's Blaze3D is an earlier draft of the 1.21.6+ API (no texture views or buffer slices, loose uniforms set by
+// name): its own backend in dev.graft.v1_21_5, on the shared core.
+
+jar { from(project(':core').sourceSets.main.output) }
+
+// ./gradlew :mc1.21.5:runClient -Pquickplay=<world>
+tasks.named('runClient') {
+	if (project.hasProperty('quickplay')) {
+		args '--quickPlaySingleplayer', project.property('quickplay')
+	}
+}
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+	filesMatching("fabric.mod.json") { expand "version": version }
+}
+

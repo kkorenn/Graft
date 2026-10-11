@@ -1,0 +1,35 @@
+plugins { id 'java-library' }
+
+// Forge 1.7.10 has no essential-loom support: plain module compiled against Forge/LaunchWrapper/LWJGL 2. Graft's
+// 1.7.10 classes reach Minecraft only by reflection (MCP and SRG names), so no deobfuscated Minecraft is needed.
+base.archivesName = 'graft-1.7.10'
+java.toolchain.languageVersion = JavaLanguageVersion.of(8)
+
+repositories {
+	maven { url = 'https://maven.minecraftforge.net/'; metadataSources { mavenPom(); artifact() } }
+	maven { url = 'https://libraries.minecraft.net/'; metadataSources { mavenPom(); artifact() } }
+	mavenCentral()
+}
+
+dependencies {
+	compileOnly 'net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10:universal@jar'
+	compileOnly 'net.minecraft:launchwrapper:1.12@jar'
+	compileOnly 'org.lwjgl.lwjgl:lwjgl:2.9.1@jar'
+	compileOnly 'org.ow2.asm:asm-debug-all:5.0.3'
+	compileOnly 'org.apache.logging.log4j:log4j-api:2.0-beta9'
+}
+
+apply from: rootProject.file('mc_legacy_forge/native.gradle')
+
+jar {
+	manifest.attributes(
+		'FMLCorePlugin': 'dev.graft.legacy.GraftCorePlugin',
+		'FMLCorePluginContainsFMLMod': 'true'
+	)
+}
+
+processResources {
+	def version = project.version
+	inputs.property 'version', version
+	filesMatching('mcmod.info') { expand 'version': version }
+}

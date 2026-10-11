@@ -1,0 +1,8 @@
+{
+	"required": true,
+	"plugin": "dev.graft.v26_3.MixinPlugin",
+	"package": "dev.graft.v26_3.mixin",
+	"compatibilityLevel": "JAVA_25",
+	"client": ["PreferredGraphicsApiMixin", "PreferredGraphicsApiInvoker", "MinecraftMixin", "RenderScaleMixin", "RingBufferMixin", "RingBufferRotateMixin", "OptionsSubScreenAccessor", "VideoSettingsMixin"],
+	"injectors": { "defaultRequire": 1 }
+}

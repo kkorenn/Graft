@@ -1,0 +1,34 @@
+plugins { id 'net.fabricmc.fabric-loom' version "${loom_version}" }
+
+loom { accessWidenerPath = file('src/main/resources/graft.accesswidener') }
+
+base.archivesName = 'graft-26.2'
+java.toolchain.languageVersion = JavaLanguageVersion.of(25)
+
+repositories { maven { url = 'https://api.modrinth.com/maven'; content { includeGroup 'maven.modrinth' } } }
+
+dependencies {
+	minecraft "com.mojang:minecraft:26.2"
+	implementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation project(':core')
+	// Compat mixins only; Sodium is not bundled. Jar from Modrinth (sodium-fabric 0.9.2+mc26.2).
+	compileOnly "maven.modrinth:sodium:mc26.2-0.9.2-fabric"
+}
+
+jar { from(project(':core').sourceSets.main.output) }
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+	filesMatching("fabric.mod.json") { expand "version": version }
+}
+
+// ./gradlew :mc26_2:runClient [-Pquickplay=<world>] -Pbench=metal|vanilla  (vanilla = whatever preferredGraphicsBackend in options.txt says)
+tasks.named('runClient') {
+	if (project.hasProperty('bench')) {
+		jvmArgs '-Dgraft.bench=true', '-Dgraft.bench.warmup=800', "-Dgraft.vanilla=${project.property('bench') != 'metal'}"
+	}
+	if (project.hasProperty('quickplay')) {
+		args '--quickPlaySingleplayer', project.property('quickplay')
+	}
+}

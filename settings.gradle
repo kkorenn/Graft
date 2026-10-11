@@ -1,0 +1,12 @@
+pluginManagement {
+	repositories {
+		maven { url = 'https://maven.fabricmc.net/' }
+		mavenCentral()
+		maven { url = 'https://repo.essential.gg/repository/maven-public' }
+		maven { url = 'https://maven.architectury.dev/' }
+		maven { url = 'https://maven.minecraftforge.net/' }
+		gradlePluginPortal()
+	}
+}
+rootProject.name = 'graft'
+include 'core', 'mc26_2', 'mc26_3', 'mc1_21_6', 'mc1_21_7', 'mc1_21_8', 'mc1_21_9', 'mc1_21_10', 'mc1_21_11', 'mc1_8_9', 'mc1_12_2', 'mc1_7_10', 'mc1_21_5'

@@ -1,0 +1,9 @@
+{
+	"required": false,
+	"package": "dev.graft.v1_21.compat.sodium",
+	"plugin": "dev.graft.v1_21.compat.CompatMixinPlugin",
+	"compatibilityLevel": "JAVA_21",
+	"client": ["CommandListMixin", "DrawCommandListMixin", "GlObjectsMixin", "TessellationMixin", "GlShaderMixin", "GlProgramMixin",
+		"GlProgramBuilderMixin", "GlUniformsMixin", "GlUniformBlockMixin", "GlFenceMixin", "ShaderInterfaceMixin", "ChunkRendererMixin", "SodiumOptionsGuiMixin"],
+	"injectors": { "defaultRequire": 1 }
+}

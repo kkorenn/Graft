@@ -1,0 +1,8 @@
+{
+	"required": false,
+	"package": "dev.graft.v26_3.compat.sodium",
+	"plugin": "dev.graft.v26_3.compat.CompatMixinPlugin",
+	"compatibilityLevel": "JAVA_25",
+	"client": ["EnumOptionMixin"],
+	"injectors": { "defaultRequire": 1 }
+}

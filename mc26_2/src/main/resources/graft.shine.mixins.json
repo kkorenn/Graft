@@ -1,0 +1,8 @@
+{
+	"required": false,
+	"package": "dev.graft.v26_2.compat.shine",
+	"plugin": "dev.graft.v26_2.compat.CompatMixinPlugin",
+	"compatibilityLevel": "JAVA_25",
+	"client": ["ShineRenderBackendMixin"],
+	"injectors": { "defaultRequire": 1 }
+}

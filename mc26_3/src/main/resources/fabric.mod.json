@@ -1,0 +1,14 @@
+{
+	"schemaVersion": 1,
+	"id": "graft",
+	"version": "${version}",
+	"name": "Graft",
+	"description": "Native Apple Metal renderer. Adds Metal to the Graphics API option and selects it on first launch.",
+	"license": "MIT",
+	"environment": "client",
+	"icon": "assets/graft/icon.png",
+	"entrypoints": { "sodium:config_api_user": ["dev.graft.v26_3.compat.SodiumOptions"] },
+	"mixins": ["graft.mixins.json", "graft.sodium.mixins.json", "graft.distanthorizons.mixins.json"],
+	"depends": { "fabricloader": ">=0.19.5", "minecraft": "~26.3", "java": ">=25" },
+	"breaks": { "metallum": "*" }
+}

@@ -1,0 +1,8 @@
+[{
+	"modid": "graft",
+	"name": "Graft",
+	"description": "Native Apple Metal renderer: replaces Minecraft's OpenGL calls with Metal.",
+	"version": "${version}",
+	"mcversion": "1.8.9",
+	"logoFile": "assets/graft/icon.png"
+}]

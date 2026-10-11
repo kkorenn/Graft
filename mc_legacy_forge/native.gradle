@@ -1,0 +1,28 @@
+// Shared by mc1_8_9 and mc1_12_2: libgraft (JNI bridge, window/input, GLSL -> MSL compiler), universal
+// arm64 + x86_64. Needs the Xcode command line tools, git and cmake (shaderdeps.sh builds glslang + SPIRV-Cross once).
+def legacy = rootProject.file('mc_legacy_forge')
+def nativeOut = layout.buildDirectory.dir('native')
+def shaderDeps = tasks.register('shaderDeps', Exec) {
+	outputs.dir new File(legacy, 'build/shaderdeps/spvc-build')
+	commandLine new File(legacy, 'shaderdeps.sh').absolutePath
+}
+def compileNative = tasks.register('compileNative', Exec) {
+	dependsOn shaderDeps
+	def srcs = [new File(legacy, 'src/main/native/graft.m'), new File(legacy, 'src/main/native/shaders.c')]
+	def out = nativeOut.get().file('natives/libgraft.dylib').asFile
+	def deps = new File(legacy, 'build/shaderdeps')
+	inputs.files srcs
+	outputs.file out
+	def jdk = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(8) }.get().metadata.installationPath.asFile
+	doFirst { out.parentFile.mkdirs() }
+	def libs = ['glslang-build/glslang/libglslang.a', 'glslang-build/glslang/libMachineIndependent.a', 'glslang-build/glslang/libGenericCodeGen.a',
+		'glslang-build/glslang/OSDependent/Unix/libOSDependent.a', 'glslang-build/SPIRV/libSPIRV.a', 'glslang-build/glslang/libglslang-default-resource-limits.a',
+		'spvc-build/libspirv-cross-c.a', 'spvc-build/libspirv-cross-msl.a', 'spvc-build/libspirv-cross-glsl.a', 'spvc-build/libspirv-cross-reflect.a',
+		'spvc-build/libspirv-cross-util.a', 'spvc-build/libspirv-cross-core.a'].collect { new File(deps, it).absolutePath }
+	commandLine(['clang', '-arch', 'arm64', '-arch', 'x86_64', '-mmacosx-version-min=10.13', '-O2', '-dynamiclib', '-fno-objc-arc',
+		"-I${jdk}/include", "-I${jdk}/include/darwin", "-I${deps}/glslang", "-I${deps}/SPIRV-Cross",
+		'-framework', 'Cocoa', '-framework', 'Metal', '-framework', 'QuartzCore', '-weak_framework', 'MetalFX', '-lc++', '-o', out.absolutePath] + srcs*.absolutePath + libs)
+}
+sourceSets.main.java.srcDir new File(legacy, 'src/main/java')
+sourceSets.main.resources.srcDir new File(legacy, 'src/main/resources')
+sourceSets.main.resources.srcDir(files(nativeOut).builtBy(compileNative))

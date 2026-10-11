@@ -1,0 +1,46 @@
+plugins { id 'net.fabricmc.fabric-loom-remap' version "${loom_version}" }
+
+base.archivesName = 'graft-1.21.10'
+java.toolchain.languageVersion = JavaLanguageVersion.of(25)
+
+repositories { maven { url = 'https://api.modrinth.com/maven'; content { includeGroup 'maven.modrinth' } } }
+
+dependencies {
+	minecraft "com.mojang:minecraft:1.21.10"
+	mappings loom.officialMojangMappings()
+	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+	implementation project(':core')
+	// Compat only; Sodium is not bundled. Jar from Modrinth.
+	modCompileOnly "maven.modrinth:sodium:mc1.21.10-0.7.3-fabric"
+	// 1.21.x ships no shaderc / SPIRV-Cross (26.x does, for its Vulkan backend): bundle them at the game's LWJGL version.
+	for (String module : ['lwjgl-shaderc', 'lwjgl-spvc']) {
+		implementation "org.lwjgl:${module}:3.3.3"
+		include "org.lwjgl:${module}:3.3.3"
+		for (String natives : ['natives-macos-arm64', 'natives-macos']) {
+			runtimeOnly "org.lwjgl:${module}:3.3.3:${natives}"
+			include "org.lwjgl:${module}:3.3.3:${natives}"
+		}
+	}
+}
+
+// 1.21.6-1.21.10 share one backend (their Blaze3D APIs are near identical).
+sourceSets.main {
+	java.srcDir '../mc1_21_legacy/src/main/java'
+	resources.srcDir '../mc1_21_legacy/src/main/resources'
+}
+
+jar { from(project(':core').sourceSets.main.output) }
+
+// ./gradlew :mc1.21.10:runClient -Pquickplay=<world>
+tasks.named('runClient') {
+	if (project.hasProperty('quickplay')) {
+		args '--quickPlaySingleplayer', project.property('quickplay')
+	}
+}
+
+processResources {
+	def version = project.version
+	inputs.property "version", version
+	filesMatching("fabric.mod.json") { expand "version": version }
+}
+
