@@ -16,10 +16,10 @@ import java.util.regex.Pattern;
  * #version 460 -> SPIR-V (glslang) -> MSL (SPIRV-Cross) with the block's member offsets reflected. GL's fixed-function
  * alpha test is appended to fragment shaders; chunk offsets come from an offsets buffer indexed by gl_BaseInstance.
  */
-final class MetalGlsl {
+public final class MetalGlsl {
 	/** A member of mc_Uniforms. */
-	static final class Member {
-		final String name, type;
+	public static final class Member {
+		public final String name, type;
 		final int array; // 0 = not an array
 		int offset = -1, size;
 
@@ -30,13 +30,13 @@ final class MetalGlsl {
 		}
 	}
 
-	static final class Linked {
-		String error;
-		String vertexMsl, fragmentMsl, vertexEntry, fragmentEntry;
-		final List<Member> members = new ArrayList<Member>();
+	public static final class Linked {
+		public String error;
+		public String vertexMsl, fragmentMsl, vertexEntry, fragmentEntry;
+		public final List<Member> members = new ArrayList<Member>();
 		final Map<String, Integer> memberIndex = new HashMap<String, Integer>();
 		/** Sampler i is bound at texture(i)/sampler(i); names as the pack declares them. */
-		final List<String> samplers = new ArrayList<String>();
+		public final List<String> samplers = new ArrayList<String>();
 		final List<Boolean> shadowSamplers = new ArrayList<Boolean>();
 		boolean vertexSamplers;
 		int blockSize;
@@ -48,6 +48,9 @@ final class MetalGlsl {
 		{"mat4", "mc_ModelViewMatrixInverse"}, {"mat4", "mc_ProjectionMatrixInverse"}, {"mat4", "mc_ModelViewProjectionMatrixInverse"},
 		{"mat3", "mc_NormalMatrix"}, {"mat4", "mc_TextureMatrix[4]"}, {"vec4", "mc_FogColor"}, {"vec4", "mc_FogParams"},
 		{"int", "mc_AlphaFunc"}, {"float", "mc_AlphaRef"}};
+
+	/** Samplers from this binding on use a constexpr sampler in the shader (Metal has 16 sampler slots; see shaders.c). */
+	static final int BOUND_SAMPLERS = 15;
 
 	private static final Map<String, String> VERTEX_BUILTINS = new HashMap<String, String>(), FRAGMENT_BUILTINS = new HashMap<String, String>(),
 		SHARED_BUILTINS = new HashMap<String, String>();
@@ -76,6 +79,8 @@ final class MetalGlsl {
 		VERTEX_BUILTINS.put("gl_FrontSecondaryColor", "mc_SecondaryColorOut");
 		VERTEX_BUILTINS.put("gl_BackSecondaryColor", "mc_SecondaryColorOut");
 		VERTEX_BUILTINS.put("gl_ClipVertex", "mc_ClipVertex");
+		VERTEX_BUILTINS.put("gl_VertexID", "gl_VertexIndex");
+		VERTEX_BUILTINS.put("gl_InstanceID", "gl_InstanceIndex");
 		FRAGMENT_BUILTINS.put("gl_Color", "mc_FrontColor");
 		FRAGMENT_BUILTINS.put("gl_SecondaryColor", "vec4(0.0)");
 		FRAGMENT_BUILTINS.put("gl_FragColor", "mc_FragData[0]");
@@ -97,7 +102,7 @@ final class MetalGlsl {
 			+ "cospi|sinpi|tanpi|acospi|asinpi|atanpi|atan2pi|divide|select|popcount|clz|ctz|rotate|absdiff|abs_diff|mad_sat|mul_hi|"
 			+ "hadd|rhadd|addsat|subsat|extract_bits|insert_bits|reverse_bits|copysign|ilogb|nextafter|fast_normalize|precise_normalize|"
 			+ "dfdx|dfdy|as_type|discard_fragment|sincos|exp10|log10)\\b");
-	private static final Pattern TEXTURE_WORD = Pattern.compile("\\btexture\\b");
+	private static final Pattern TEXTURE_WORD = Pattern.compile("\\btexture\\b(?!\\s*\\()"); // calls of texture() (lenient 1.20 drivers allow them) stay
 	// Built-in functions added after GLSL 1.20 that 1.x packs define themselves.
 	private static final Pattern NEW_BUILTINS = Pattern.compile("\\b(round|trunc|roundEven|isnan|isinf|sinh|cosh|tanh|asinh|acosh|atanh|"
 		+ "floatBitsToInt|floatBitsToUint|intBitsToFloat|uintBitsToFloat|inverse|determinant|textureSize|texelFetch|fma|frexp|ldexp|"
@@ -150,7 +155,7 @@ final class MetalGlsl {
 		}
 	}
 
-	static Linked link(String vertexSource, String fragmentSource, Map<String, Integer> attributeLocations) {
+	public static Linked link(String vertexSource, String fragmentSource, Map<String, Integer> attributeLocations) {
 		Linked l = new Linked();
 		Stage v = scan(vertexSource, false, l), f = scan(fragmentSource, true, l);
 		if (l.error != null) {
@@ -185,7 +190,15 @@ final class MetalGlsl {
 			}
 		}
 		StringBuilder samplerDecls = new StringBuilder();
-		for (Var s : samplers.values()) {
+		List<Var> ordered = new ArrayList<Var>();
+		for (int pass = 0; pass < 2; pass++) { // shadow samplers first: they keep bound (compare) samplers, see BOUND_SAMPLERS
+			for (Var s : samplers.values()) {
+				if (s.type.contains("Shadow") == (pass == 0)) {
+					ordered.add(s);
+				}
+			}
+		}
+		for (Var s : ordered) {
 			int binding = l.samplers.size();
 			String type = s.type.equals("sampler1D") || s.type.equals("sampler2DRect") ? "sampler2D" : s.type.equals("sampler1DShadow") ? "sampler2DShadow" : s.type;
 			samplerDecls.append("layout(set = 0, binding = ").append(2 + binding).append(") uniform ").append(type).append(' ').append(s.name).append(";\n");
@@ -224,21 +237,122 @@ final class MetalGlsl {
 			l.error = "fragment: " + fr.substring(4) + "\n" + numbered(fs);
 			return l;
 		}
-		l.vertexMsl = msl(vr, l, true);
-		l.vertexEntry = entry;
+		l.vertexMsl = msl(vr, l, false);
 		l.fragmentMsl = msl(fr, l, true);
-		l.fragmentEntry = entry;
 		return l;
 	}
 
-	private static String entry;
+	/** Bumped whenever the translation changes, so disk-cached results from older builds are not reused. */
+	private static final String CACHE_VERSION = "1";
+
+	/** {@link #link} with results cached on disk by source hash (the GLSL -> MSL work, not Metal's own compile). */
+	public static Linked linkCached(String vertexSource, String fragmentSource, Map<String, Integer> attributeLocations, java.io.File dir) {
+		String key;
+		try {
+			java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-1");
+			md.update(CACHE_VERSION.getBytes("UTF-8"));
+			md.update(vertexSource.getBytes("UTF-8"));
+			md.update((byte)0);
+			md.update(fragmentSource.getBytes("UTF-8"));
+			md.update(new TreeMap<String, Integer>(attributeLocations).toString().getBytes("UTF-8"));
+			key = String.format("%040x", new java.math.BigInteger(1, md.digest()));
+		} catch (Exception e) {
+			return link(vertexSource, fragmentSource, attributeLocations);
+		}
+		java.io.File f = new java.io.File(dir, key + ".msl");
+		if (f.isFile()) {
+			try {
+				Linked l = read(new String(java.nio.file.Files.readAllBytes(f.toPath()), "UTF-8"));
+				if (l != null) {
+					return l;
+				}
+			} catch (java.io.IOException ignored) {
+			}
+		}
+		Linked l = link(vertexSource, fragmentSource, attributeLocations);
+		if (l.error == null) {
+			try {
+				dir.mkdirs();
+				java.io.File tmp = new java.io.File(dir, key + ".tmp");
+				java.nio.file.Files.write(tmp.toPath(), write(l).getBytes("UTF-8"));
+				tmp.renameTo(f);
+			} catch (java.io.IOException ignored) {
+			}
+		}
+		return l;
+	}
+
+	private static final String SEP = "\n%%GRAFT%%\n";
+
+	private static String write(Linked l) {
+		StringBuilder b = new StringBuilder();
+		b.append(l.vertexEntry).append(' ').append(l.fragmentEntry).append(' ').append(l.blockSize).append(' ').append(l.vertexSamplers).append('\n');
+		for (Member m : l.members) {
+			b.append("M ").append(m.name).append(' ').append(m.type).append(' ').append(m.array).append(' ').append(m.offset).append(' ').append(m.size).append('\n');
+		}
+		for (int i = 0; i < l.samplers.size(); i++) {
+			b.append("S ").append(l.samplers.get(i)).append(' ').append(l.shadowSamplers.get(i)).append('\n');
+		}
+		return b.append(SEP).append(l.vertexMsl).append(SEP).append(l.fragmentMsl).toString();
+	}
+
+	private static Linked read(String s) {
+		String[] parts = s.split(java.util.regex.Pattern.quote(SEP), -1);
+		if (parts.length != 3) {
+			return null;
+		}
+		Linked l = new Linked();
+		String[] lines = parts[0].split("\n");
+		String[] h = lines[0].split(" ");
+		l.vertexEntry = h[0];
+		l.fragmentEntry = h[1];
+		l.blockSize = Integer.parseInt(h[2]);
+		l.vertexSamplers = Boolean.parseBoolean(h[3]);
+		for (int i = 1; i < lines.length; i++) {
+			String[] p = lines[i].split(" ");
+			if (p[0].equals("M")) {
+				Member m = new Member(p[1], p[2], Integer.parseInt(p[3]));
+				m.offset = Integer.parseInt(p[4]);
+				m.size = Integer.parseInt(p[5]);
+				l.memberIndex.put(m.name, l.members.size());
+				l.members.add(m);
+			} else if (p[0].equals("S")) {
+				l.samplers.add(p[1]);
+				l.shadowSamplers.add(Boolean.parseBoolean(p[2]));
+			}
+		}
+		l.vertexMsl = parts[1];
+		l.fragmentMsl = parts[2];
+		return l;
+	}
+
+	private static long checkDevice;
+
+	/** Compiles MSL with Metal (headless checks); returns null if it compiles, else Metal's error. */
+	public static synchronized String checkMsl(String msl) {
+		if (checkDevice == 0L) {
+			checkDevice = Objc.createDevice();
+		}
+		java.nio.ByteBuffer err = java.nio.ByteBuffer.allocateDirect(8).order(java.nio.ByteOrder.nativeOrder());
+		long pool = Objc.objc_autoreleasePoolPush();
+		try {
+			long lib = Objc.objc_msgSend(checkDevice, Objc.sel("newLibraryWithSource:options:error:"), Objc.nsString(msl), 0L, Objc.address(err));
+			if (lib == 0L) {
+				return Objc.string(Objc.send(err.getLong(0), "localizedDescription"));
+			}
+			Objc.send(lib, "release");
+			return null;
+		} finally {
+			Objc.objc_autoreleasePoolPop(pool);
+		}
+	}
 
 	/** Splits a native result into reflection (block offsets) and MSL. */
-	private static String msl(String result, Linked l, boolean reflect) {
+	private static String msl(String result, Linked l, boolean fragment) {
 		int at = result.indexOf("%%MSL%%\n");
 		for (String line : result.substring(3, at).split("\n")) {
 			String[] p = line.split(" ");
-			if (p[0].equals("U") && reflect) {
+			if (p[0].equals("U")) {
 				Integer i = l.memberIndex.get(p[1]);
 				if (i != null && l.members.get(i).offset < 0) {
 					Member m = l.members.get(i);
@@ -247,7 +361,11 @@ final class MetalGlsl {
 					l.blockSize = Math.max(l.blockSize, m.offset + m.size);
 				}
 			} else if (p[0].equals("E")) {
-				entry = p[1];
+				if (fragment) {
+					l.fragmentEntry = p[1];
+				} else {
+					l.vertexEntry = p[1];
+				}
 			}
 		}
 		l.blockSize = (l.blockSize + 15) & ~15;

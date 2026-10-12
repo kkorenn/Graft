@@ -545,7 +545,8 @@ public final class MetalRenderPass {
 			send(encoder, S_FILL, fill);
 			encFill = fill;
 		}
-		boolean bias = depthTest && r.depthBiasConstant() != 0.0F && r.depthBiasSlope() != 0.0F;
+		// GL disables polygon offset only when both terms are zero.
+		boolean bias = depthTest && (r.depthBiasConstant() != 0.0F || r.depthBiasSlope() != 0.0F);
 		float biasConstant = bias ? r.depthBiasConstant() : 0.0F;
 		float biasSlope = bias ? r.depthBiasSlope() : 0.0F;
 		long biasKey = (long)Float.floatToRawIntBits(biasConstant) << 32 | Float.floatToRawIntBits(biasSlope) & 0xFFFFFFFFL;

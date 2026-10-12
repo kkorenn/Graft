@@ -70,12 +70,87 @@ public final class MGL {
 
 	private static long newPipeline(long desc) {
 		ByteBuffer err = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+		long archives = archiveArray;
+		if (archives != 0L) {
+			send(desc, "setBinaryArchives:", archives); // compiled on an earlier run: no compile now
+		}
 		long p = objc_msgSend(device, sel("newRenderPipelineStateWithDescriptor:error:"), desc, Objc.address(err));
+		if (p != 0L && archives != 0L) {
+			synchronized (ARCHIVE_LOCK) {
+				if ((objc_msgSend(archive, sel("addRenderPipelineFunctionsWithDescriptor:error:"), desc, Objc.address(err)) & 0xFF) != 0L) { // BOOL
+					archiveDirty = true;
+					archiveAdded = System.nanoTime();
+				}
+			}
+		}
 		send(desc, "release");
 		if (p == 0L) {
 			LOG.error("Graft: pipeline failed: {}", string(send(err.getLong(0), "localizedDescription")));
 		}
 		return p;
+	}
+
+	// ---------------------------------------------------------------- pipeline binary archive (graft/shadercache)
+
+	private static final Object ARCHIVE_LOCK = new Object();
+	private static volatile long archive, archiveArray;
+	private static java.io.File archiveFile;
+	private static volatile boolean archiveDirty;
+	private static volatile long archiveAdded;
+
+	/**
+	 * Opens the MTLBinaryArchive kept at this file (or starts an empty one): pipeline states found there are not compiled
+	 * again, so a pack's second launch has no pipeline-compile hitches. -Dgraft.pipelineArchive=false turns it off.
+	 */
+	public static void openPipelineArchive(java.io.File f) {
+		if (archive != 0L || "false".equals(System.getProperty("graft.pipelineArchive"))) {
+			return;
+		}
+		try {
+			long desc = send(send(cls("MTLBinaryArchiveDescriptor"), "alloc"), "init");
+			ByteBuffer err = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+			long a = 0L;
+			if (f.isFile()) {
+				send(desc, "setUrl:", send(cls("NSURL"), "fileURLWithPath:", nsString(f.getAbsolutePath())));
+				a = objc_msgSend(device, sel("newBinaryArchiveWithDescriptor:error:"), desc, Objc.address(err));
+				if (a == 0L) { // made by another OS / GPU driver: start over
+					LOG.info("Graft: pipeline archive {} not usable, starting a new one", f);
+					send(desc, "setUrl:", 0L);
+				}
+			}
+			if (a == 0L) {
+				a = objc_msgSend(device, sel("newBinaryArchiveWithDescriptor:error:"), desc, Objc.address(err));
+			}
+			send(desc, "release");
+			if (a != 0L) {
+				archiveFile = f;
+				archive = a;
+				archiveArray = send(send(cls("NSArray"), "arrayWithObject:", a), "retain");
+			}
+		} catch (RuntimeException e) {
+			LOG.warn("Graft: no pipeline archive: {}", e.toString());
+		}
+	}
+
+	/** Writes the archive when new pipelines were added and none for a few seconds (a write is a few ms; rare). */
+	public static void savePipelineArchive(boolean now) {
+		if (!archiveDirty || !now && System.nanoTime() - archiveAdded < 5_000_000_000L) {
+			return;
+		}
+		synchronized (ARCHIVE_LOCK) {
+			archiveDirty = false;
+			java.io.File tmp = new java.io.File(archiveFile.getPath() + ".tmp");
+			archiveFile.getParentFile().mkdirs();
+			ByteBuffer err = ByteBuffer.allocateDirect(8).order(ByteOrder.nativeOrder());
+			long url = send(cls("NSURL"), "fileURLWithPath:", nsString(tmp.getAbsolutePath()));
+			if ((objc_msgSend(archive, sel("serializeToURL:error:"), url, Objc.address(err)) & 0xFF) != 0L) { // BOOL
+				if (!tmp.renameTo(archiveFile)) {
+					tmp.delete();
+				}
+			} else {
+				LOG.warn("Graft: could not save the pipeline archive: {}", string(send(err.getLong(0), "localizedDescription")));
+			}
+		}
 	}
 
 	private static long newTexture(int w, int h, int levels, int format) {
@@ -98,7 +173,7 @@ public final class MGL {
 			send(renc, "endEncoding");
 			renc = 0L;
 			encFb = -1;
-			if (frameNumber == DUMP_FRAME || frameNumber == DUMP_FRAME + 1) {
+			if (DUMP_FRAME >= 0 && (frameNumber == DUMP_FRAME || frameNumber == DUMP_FRAME + 1)) {
 				LOG.info("Graft: frame {} pass {} fb {} prog {} colors {} fmt {}", frameNumber, dumpIndex, lastPassFb,
 					Programs.current != null ? Programs.current.id : 0, encColors, java.util.Arrays.toString(java.util.Arrays.copyOf(encFormats, encColors)));
 				if (frameNumber == DUMP_FRAME + 1) {
@@ -140,18 +215,19 @@ public final class MGL {
 	@SuppressWarnings("unchecked")
 	private static final ArrayList<Ring>[] rings = new ArrayList[] {new ArrayList<Ring>(), new ArrayList<Ring>(), new ArrayList<Ring>()};
 	private static int frame, ringIdx;
-	private static long rBuf, rOff;
+	private static long rBuf, rOff, rAddr;
 	private static ByteBuffer rView;
 
 	private static final class Ring {
-		final long buf, size;
+		final long buf, size, addr;
 		final ByteBuffer view;
 		long used;
 
 		Ring(long size) {
 			this.size = size;
 			buf = objc_msgSend(device, sel("newBufferWithLength:options:"), size, 0L);
-			view = Objc.view(send(buf, "contents"), size);
+			addr = send(buf, "contents");
+			view = Objc.view(addr, size);
 		}
 	}
 
@@ -165,6 +241,7 @@ public final class MGL {
 				rBuf = r.buf;
 				rOff = o;
 				rView = r.view;
+				rAddr = r.addr;
 				return;
 			}
 		}
@@ -174,14 +251,13 @@ public final class MGL {
 		rBuf = r.buf;
 		rOff = 0;
 		rView = r.view;
+		rAddr = r.addr;
 	}
 
 	/** Copies native memory into transient GPU memory; result in rBuf/rOff. */
 	private static void copyIn(long src, long len) {
 		alloc(len);
-		ByteBuffer dst = rView.duplicate();
-		dst.position((int)rOff);
-		dst.put(Objc.wrap(src, len));
+		Objc.memcpy(rAddr + rOff, src, len);
 	}
 
 	// ---------------------------------------------------------------- presentation
@@ -380,7 +456,7 @@ public final class MGL {
 	private static int fx() {
 		return Math.min(unit, UNITS - 1);
 	}
-	private static final int UNITS = 4, BIND_UNITS = 16; // fixed-function units / texture binding units (shader packs use up to 16)
+	private static final int UNITS = 4, BIND_UNITS = 24; // fixed-function units / texture binding units (shader packs: 0-15, colortex8-15 on 16-23)
 	private static final int[] bound = new int[BIND_UNITS];
 	private static final float[] color = {1, 1, 1, 1}, normal = {0, 0, 1}, tc0 = new float[2], tc1 = new float[2];
 	private static int vx, vy, vw = 1, vh = 1, sx, sy, sw, sh;
@@ -468,7 +544,7 @@ public final class MGL {
 	private static final class Tex {
 		long mtl;
 		int w, h, levels, format = BGRA8;
-		int minF = 0x2702, magF = 0x2601, wrapS = 0x2901, wrapT = 0x2901, maxLevel = 1000, compareMode, compareFunc = 0x203;
+		int minF = 0x2702, magF = 0x2601, wrapS = 0x2901, wrapT = 0x2901, maxLevel = 1000, compareMode, compareFunc = 0x203, aniso = 1;
 		long sampler, compareSampler;
 	}
 
@@ -516,7 +592,7 @@ public final class MGL {
 
 	private static long sampler(Tex t, boolean compare) {
 		int key = (t.minF >> 8 & 1) << 2 | t.minF & 3 | (t.magF & 1) << 4 | (int)wrapCode(t.wrapS) << 8 | (int)wrapCode(t.wrapT) << 12
-			| (compare ? 1 << 16 | (t.compareFunc & 7) << 17 : 0);
+			| (compare ? 1 << 16 | (t.compareFunc & 7) << 17 : 0) | (31 - Integer.numberOfLeadingZeros(t.aniso)) << 20;
 		Long s = samplers.get(key);
 		if (s == null) {
 			long d = send(send(cls("MTLSamplerDescriptor"), "alloc"), "init");
@@ -527,6 +603,9 @@ public final class MGL {
 			send(d, "setMipFilter:", mip);
 			send(d, "setSAddressMode:", wrapCode(t.wrapS));
 			send(d, "setTAddressMode:", wrapCode(t.wrapT));
+			if (t.aniso > 1) {
+				send(d, "setMaxAnisotropy:", (long)t.aniso);
+			}
 			if (compare) {
 				send(d, "setCompareFunction:", t.compareFunc & 7);
 			}
@@ -648,7 +727,7 @@ public final class MGL {
 	}
 
 	private static final class Fbo {
-		final int[] color = new int[8];
+		final int[] color = new int[16];
 		int depth, depthTex, read;
 		int[] draw = {0}; // glDrawBuffers: attachment index per fragment output, -1 = GL_NONE
 	}
@@ -733,7 +812,12 @@ public final class MGL {
 			send(ca, "setLoadAction:", clearC ? 2L : 1L);
 			send(ca, "setStoreAction:", 1L);
 			if (clearC) {
-				Objc.clearColor(ca, clearR, clearG, clearB, clearA);
+				float[] c = clearColors != null && k < clearColors.length ? clearColors[k] : null;
+				if (c != null) {
+					Objc.clearColor(ca, c[0], c[1], c[2], c[3]);
+				} else {
+					Objc.clearColor(ca, clearR, clearG, clearB, clearA);
+				}
 			}
 		}
 		if (depth != 0L) {
@@ -746,6 +830,7 @@ public final class MGL {
 			}
 		}
 		renc = send(cmd(), "renderCommandEncoderWithDescriptor:", rpd);
+		encGen++;
 		encFb = drawFb;
 		lastPassFb = drawFb;
 		encW = (int)send(size, "width");
@@ -1020,7 +1105,8 @@ public final class MGL {
 				n.put(batch);
 				batch = n;
 			}
-			batch.put(Objc.wrap(addr, len));
+			Objc.memcpy(address(batch) + batch.position(), addr, len);
+			batch.position(batch.position() + (int)len);
 			System.arraycopy(fmt, 0, batchFmt, 0, 5);
 			System.arraycopy(off, 0, batchOff, 0, 5);
 			batchStride = stride;
@@ -1088,6 +1174,11 @@ public final class MGL {
 		}
 	}
 
+	/** Encoded blend state (as in pipeline keys) for GL factors with GL_FUNC_ADD; used for pack blend.<program> overrides. */
+	public static int blendState(int srcRgb, int dstRgb, int srcA, int dstA) {
+		return 1 | blendFactor(srcRgb) << 1 | blendFactor(dstRgb) << 5 | blendFactor(srcA) << 9 | blendFactor(dstA) << 13;
+	}
+
 	private static int blendOp(int gl) {
 		switch (gl) {
 			case 0x800A: return 1;
@@ -1104,35 +1195,107 @@ public final class MGL {
 	private static final StringBuilder key = new StringBuilder();
 	private static int terrainStride = 28;
 
+	private static int lastKind = -1, lastBlend, lastMask, lastTerrainStride, encGen, lastEncGen = -1;
+	private static Programs.Program lastProg;
+	private static long lastPipe;
+
+	/** A relinked program keeps its identity, so the one-entry cache must not hand back its old pipeline. */
+	static void forgetPipeline() {
+		lastPipe = 0L;
+	}
+	private static final int[] lastFmt = new int[SLOTS], lastStride = new int[SLOTS];
+
+	/** The pipeline state for the next draw; consecutive draws with the same state skip the key lookup (no allocation). */
 	private static long pipeline(int kind) {
 		Programs.Program prog = Programs.current;
-		int blend = st.blend ? 1 | blendFactor(st.srcRgb) << 1 | blendFactor(st.dstRgb) << 5 | blendFactor(st.srcA) << 9 | blendFactor(st.dstA) << 13 | blendOp(st.blendEq) << 17 : 0;
+		int blend = prog != null && prog.blend >= 0 ? prog.blend
+			: st.blend ? 1 | blendFactor(st.srcRgb) << 1 | blendFactor(st.dstRgb) << 5 | blendFactor(st.srcA) << 9 | blendFactor(st.dstA) << 13 | blendOp(st.blendEq) << 17 : 0;
+		int slots = prog != null ? SLOTS : 5;
+		if (lastPipe != 0L && kind == lastKind && prog == lastProg && blend == lastBlend && st.colorMask == lastMask && encGen == lastEncGen
+			&& (kind == TERRAIN ? terrainStride == lastTerrainStride : sameLayout(slots))) {
+			return lastPipe;
+		}
+		String k = pipelineKey(key, kind, blend, st.colorMask, encDepth, encFormats, encColors, slots, dFmt, dStride, terrainStride);
+		HashMap<String, Long> cache = prog != null ? prog.pipelines : fixedPipelines;
+		Long p = cache.get(k);
+		if (p == null) {
+			cache.put(k, p = buildPipeline(blend, st.colorMask, kind, prog != null, prog != null ? prog.vertexFn : kind == TERRAIN ? tvfn : vfn,
+				prog != null ? prog.fragmentFn : ffn, prog != null ? prog.attachBlend : null, encFormats, encColors, encDepth, dFmt, dStride, terrainStride));
+		}
+		lastKind = kind;
+		lastProg = prog;
+		lastBlend = blend;
+		lastMask = st.colorMask;
+		lastEncGen = encGen;
+		lastTerrainStride = terrainStride;
+		System.arraycopy(dFmt, 0, lastFmt, 0, SLOTS);
+		System.arraycopy(dStride, 0, lastStride, 0, SLOTS);
+		lastPipe = p;
+		return p;
+	}
+
+	private static boolean sameLayout(int slots) {
+		for (int i = 0; i < slots; i++) {
+			if (dFmt[i] != lastFmt[i] || dFmt[i] != 0 && dStride[i] != lastStride[i]) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private static String pipelineKey(StringBuilder key, int kind, int blend, int colorMask, boolean depth, int[] formats, int colors, int slots, int[] fmt,
+		int[] stride, int terrainStride) {
 		key.setLength(0);
-		key.append(kind).append(':').append(blend).append(':').append(st.colorMask).append(':').append(encDepth ? 'd' : '-');
-		for (int k = 0; k < encColors; k++) {
-			key.append(',').append(encFormats[k]);
+		key.append(kind).append(':').append(blend).append(':').append(colorMask).append(':').append(depth ? 'd' : '-');
+		for (int k = 0; k < colors; k++) {
+			key.append(',').append(formats[k]);
 		}
 		key.append('|');
 		if (kind == TERRAIN) {
 			key.append(terrainStride);
 		} else {
-			for (int i = 0; i < (prog != null ? SLOTS : 5); i++) {
-				key.append(dFmt[i]).append('/').append(dFmt[i] != 0 ? dStride[i] : 0).append(' ');
+			for (int i = 0; i < slots; i++) {
+				key.append(fmt[i]).append('/').append(fmt[i] != 0 ? stride[i] : 0).append(' ');
 			}
 		}
-		String k = key.toString();
-		HashMap<String, Long> cache = prog != null ? prog.pipelines : fixedPipelines;
-		Long p = cache.get(k);
-		if (p == null) {
-			cache.put(k, p = buildPipeline(blend, st.colorMask, kind, prog));
-		}
-		return p;
+		return key.toString();
 	}
 
-	private static long buildPipeline(int blend, int colorMask, int kind, Programs.Program prog) {
+	/**
+	 * Shader-pack prewarm, on the loader thread: builds the pipeline state a program's draws will need into {@code into}
+	 * (key -> pipeline; {@link Programs#addPipelines} installs them). terrain = chunk draws in the 56-byte layout, else the
+	 * full-screen quad of deferred/composite/final passes. Formats are GL internal formats of the pass's color targets.
+	 */
+	public static void prewarm(long[] fns, int blend, int[] attachBlend, boolean terrain, int[] internalFormats, boolean depth, java.util.Map<String, Long> into) {
+		int[] formats = new int[internalFormats.length], fmt = new int[SLOTS], stride = new int[SLOTS];
+		for (int k = 0; k < formats.length; k++) {
+			formats[k] = internalFormats[k] == 0 ? BGRA8 : pixelFormat(internalFormats[k]);
+		}
+		for (int i = 0; i < 5; i++) {
+			fmt[i] = IMM_FMT[i];
+			stride[i] = 36;
+		}
+		int kind = terrain ? TERRAIN : FIXED;
+		String k = pipelineKey(new StringBuilder(), kind, blend, 15, depth, formats, formats.length, SLOTS, fmt, stride, 56);
+		if (into.containsKey(k)) {
+			return;
+		}
+		long pool = Objc.objc_autoreleasePoolPush();
+		try {
+			long p = buildPipeline(blend, 15, kind, true, fns[0], fns[1], attachBlend, formats, formats.length, depth, fmt, stride, 56);
+			if (p != 0L) {
+				into.put(k, p);
+			}
+		} finally {
+			Objc.objc_autoreleasePoolPop(pool);
+		}
+	}
+
+	private static long buildPipeline(int blend, int colorMask, int kind, boolean program, long vertexFn, long fragmentFn, int[] attachBlend,
+		int[] formats, int colors, boolean depth, int[] fmt, int[] stride, int terrainStride) {
 		long vd = send(cls("MTLVertexDescriptor"), "vertexDescriptor");
 		long attrs = send(vd, "attributes"), layouts = send(vd, "layouts");
-		int slots = prog != null ? SLOTS : 5, constBuffer = prog != null ? 17 : 6;
+		int slots = program ? SLOTS : 5, constBuffer = program ? 17 : 6;
 		boolean[] set = new boolean[SLOTS];
 		if (kind == TERRAIN) { // chunk vertices in buffer 1: pos, color, uv, lightmap (+ normal, mc_midTexCoord, at_tangent, mc_Entity)
 			long[][] layout = terrainStride == 56
@@ -1153,20 +1316,20 @@ public final class MGL {
 			send(l, "setStepFunction:", 1L);
 		} else {
 			for (int i = 0; i < slots; i++) {
-				if (dFmt[i] != 0) {
+				if (fmt[i] != 0) {
 					long a = send(attrs, "objectAtIndexedSubscript:", i);
-					send(a, "setFormat:", dFmt[i]);
+					send(a, "setFormat:", fmt[i]);
 					send(a, "setOffset:", 0L);
 					send(a, "setBufferIndex:", 1L + i);
 					long l = send(layouts, "objectAtIndexedSubscript:", 1L + i);
-					send(l, "setStride:", dStride[i]);
+					send(l, "setStride:", stride[i]);
 					send(l, "setStepFunction:", 1L);
 					set[i] = true;
 				}
 			}
 		}
 		boolean constants = false;
-		if (kind != TERRAIN || prog != null) {
+		if (kind != TERRAIN || program) {
 			for (int i = 0; i < slots; i++) {
 				if (!set[i]) { // absent attribute: a float4 from the constants buffer (current color/normal/texcoords)
 					long a = send(attrs, "objectAtIndexedSubscript:", i);
@@ -1184,29 +1347,30 @@ public final class MGL {
 			send(l, "setStepRate:", 0L);
 		}
 		long pd = send(send(cls("MTLRenderPipelineDescriptor"), "alloc"), "init");
-		send(pd, "setVertexFunction:", prog != null ? prog.vertexFn : kind == TERRAIN ? tvfn : vfn);
-		send(pd, "setFragmentFunction:", prog != null ? prog.fragmentFn : ffn);
+		send(pd, "setVertexFunction:", vertexFn);
+		send(pd, "setFragmentFunction:", fragmentFn);
 		send(pd, "setVertexDescriptor:", vd);
 		long mask = ((colorMask & 1) != 0 ? 8 : 0) | ((colorMask & 2) != 0 ? 4 : 0) | ((colorMask & 4) != 0 ? 2 : 0) | ((colorMask & 8) != 0 ? 1 : 0);
 		long cas = send(pd, "colorAttachments");
-		for (int k = 0; k < encColors; k++) {
-			if (encFormats[k] == 0) {
+		for (int k = 0; k < colors; k++) {
+			if (formats[k] == 0) {
 				continue;
 			}
 			long ca = send(cas, "objectAtIndexedSubscript:", k);
-			send(ca, "setPixelFormat:", encFormats[k]);
+			send(ca, "setPixelFormat:", formats[k]);
 			send(ca, "setWriteMask:", mask);
-			if ((blend & 1) != 0) {
+			int bl = attachBlend != null && k < attachBlend.length && attachBlend[k] >= 0 ? attachBlend[k] : blend;
+			if ((bl & 1) != 0) {
 				send(ca, "setBlendingEnabled:", 1L);
-				send(ca, "setSourceRGBBlendFactor:", blend >> 1 & 15);
-				send(ca, "setDestinationRGBBlendFactor:", blend >> 5 & 15);
-				send(ca, "setSourceAlphaBlendFactor:", blend >> 9 & 15);
-				send(ca, "setDestinationAlphaBlendFactor:", blend >> 13 & 15);
-				send(ca, "setRgbBlendOperation:", blend >> 17 & 7);
-				send(ca, "setAlphaBlendOperation:", blend >> 17 & 7);
+				send(ca, "setSourceRGBBlendFactor:", bl >> 1 & 15);
+				send(ca, "setDestinationRGBBlendFactor:", bl >> 5 & 15);
+				send(ca, "setSourceAlphaBlendFactor:", bl >> 9 & 15);
+				send(ca, "setDestinationAlphaBlendFactor:", bl >> 13 & 15);
+				send(ca, "setRgbBlendOperation:", bl >> 17 & 7);
+				send(ca, "setAlphaBlendOperation:", bl >> 17 & 7);
 			}
 		}
-		if (encDepth) {
+		if (depth) {
 			send(pd, "setDepthAttachmentPixelFormat:", DEPTH32F);
 		}
 		return newPipeline(pd);
@@ -1413,13 +1577,15 @@ public final class MGL {
 		S_VSAMP = sel("setVertexSamplerState:atIndex:");
 	private static final long[] curProgTex = new long[32], curProgSamp = new long[32];
 	private static long zeroOffsets, whiteDepth;
-	private static final float[] inv = new float[16], nrm = new float[9];
+	private static final float[] inv = new float[16], nrm = new float[9], handPr = new float[16];
+	/** Scale of clip-space z for shader programs (the shader-pack hand pass sets MC_HAND_DEPTH); 1 = off. */
+	public static float handDepth = 1f;
 
 	/** mc_Uniforms (pack values + compatibility built-ins from GL state) and the program's samplers. */
 	private static final java.util.HashSet<Integer> dumpedUniforms = new java.util.HashSet<Integer>();
 
 	private static void prepareProgram(long e, Programs.Program p) {
-		if (frameNumber == DUMP_FRAME && dumpedUniforms.add(p.id)) {
+		if (DUMP_FRAME >= 0 && frameNumber == DUMP_FRAME && dumpedUniforms.add(p.id)) {
 			StringBuilder b = new StringBuilder();
 			for (MetalGlsl.Member m : p.linked.members) {
 				if (m.offset < 0 || m.name.startsWith("mc_")) {
@@ -1439,13 +1605,16 @@ public final class MGL {
 		alloc(size);
 		ByteBuffer v = rView;
 		int base = (int)rOff;
-		ByteBuffer src = p.block.duplicate();
-		src.clear();
-		ByteBuffer dst = v.duplicate();
-		dst.position(base);
-		dst.put(src);
+		Objc.memcpy(rAddr + rOff, p.blockAddr, size);
 		int[] b = p.builtins;
 		float[] mv = mvStack[mvTop], pr = prStack[prTop];
+		if (handDepth != 1f) { // shader-pack hand: depth squeezed towards the near plane (MC_HAND_DEPTH)
+			System.arraycopy(pr, 0, handPr, 0, 16);
+			for (int i = 2; i < 16; i += 4) {
+				handPr[i] *= handDepth;
+			}
+			pr = handPr;
+		}
 		mul(tmp2, pr, mv);
 		putMatAt(v, base, b[0], mv);
 		putMatAt(v, base, b[1], pr);
@@ -1481,10 +1650,10 @@ public final class MGL {
 				.putFloat(base + b[9] + 12, st.fogEnd != st.fogStart ? 1 / (st.fogEnd - st.fogStart) : 0);
 		}
 		if (b[10] >= 0) {
-			v.putInt(base + b[10], st.alphaTest ? st.alphaFunc : 0);
+			v.putInt(base + b[10], p.alphaFunc >= 0 ? p.alphaFunc : st.alphaTest ? st.alphaFunc : 0);
 		}
 		if (b[11] >= 0) {
-			v.putFloat(base + b[11], st.alphaRef);
+			v.putFloat(base + b[11], p.alphaFunc >= 0 ? p.alphaRef : st.alphaRef);
 		}
 		objc_msgSend(e, S_VBUF, rBuf, rOff, 28L);
 		objc_msgSend(e, S_VBUF_FRAG, rBuf, rOff, 28L);
@@ -1506,12 +1675,17 @@ public final class MGL {
 			}
 			long mtl = t != null ? t.mtl : shadow ? whiteDepth : white;
 			long samp = t != null ? shadow ? compareSampler(t) : sampler(t) : shadow ? compareSampler(DEFAULT_TEX) : sampler(DEFAULT_TEX);
-			if (mtl != curProgTex[i] || samp != curProgSamp[i]) {
+			boolean ownSampler = i < MetalGlsl.BOUND_SAMPLERS; // later ones use a constexpr sampler (Metal has 16 slots)
+			if (mtl != curProgTex[i] || ownSampler && samp != curProgSamp[i]) {
 				objc_msgSend(e, S_FTEX, mtl, i);
-				objc_msgSend(e, S_FSAMP, samp, i);
+				if (ownSampler) {
+					objc_msgSend(e, S_FSAMP, samp, i);
+				}
 				if (p.linked.vertexSamplers) {
 					objc_msgSend(e, S_VTEX, mtl, i);
-					objc_msgSend(e, S_VSAMP, samp, i);
+					if (ownSampler) {
+						objc_msgSend(e, S_VSAMP, samp, i);
+					}
 				}
 				curProgTex[i] = mtl;
 				curProgSamp[i] = samp;
@@ -1652,7 +1826,25 @@ public final class MGL {
 		return objc_msgSend(device, sel("newBufferWithBytes:length:options:"), address(data), len, 0L);
 	}
 
-	static void releaseBuffer(long buf) {
+	/** Width or height of a texture, 0 if unknown (render thread). */
+	public static int textureSize(int id, boolean height) {
+		Tex t = textures.get(id);
+		return t == null ? 0 : height ? t.h : t.w;
+	}
+
+	private static final long S_NEW_BUFFER = sel("newBufferWithBytes:length:options:");
+
+	/** newBuffer from any thread (chunk workers): creating Metal buffers is thread-safe. */
+	static long newBufferAnyThread(ByteBuffer data, long len) {
+		long pool = Objc.objc_autoreleasePoolPush();
+		try {
+			return objc_msgSend(device, S_NEW_BUFFER, address(data), len, 0L);
+		} finally {
+			Objc.objc_autoreleasePoolPop(pool);
+		}
+	}
+
+		static void releaseBuffer(long buf) {
 		if (buf != 0L) {
 			send(buf, "release"); // command buffers retain what they use
 		}
@@ -1727,7 +1919,12 @@ public final class MGL {
 			case 0x4001: st.light1 = on; break;
 			case 0x8037: st.polyOffset = on; break;
 			case 0xC11: st.scissorTest = on; break;
-			case 0xDE1: st.tex2d[fx()] = on; break;
+			case 0xDE1:
+				st.tex2d[fx()] = on;
+				if (unit == 0 && dev.graft.legacy.shaders.ShaderPipeline.active) {
+					dev.graft.legacy.shaders.ShaderPipeline.textureToggled(on);
+				}
+				break;
 			default: // normalize, rescale normal, color material, texgen, logic op, line smooth: no effect here
 		}
 	}
@@ -1860,6 +2057,15 @@ public final class MGL {
 
 	public static void glClearDepth(double depth) {
 		clearDepth = depth;
+	}
+
+	private static float[][] clearColors;
+
+	/** One render pass that clears the draw buffers to their own colors (null entry = glClearColor) and depth if asked. */
+	public static void clearBuffers(float[][] colors, boolean depth) {
+		clearColors = colors;
+		glClear(depth ? 0x4100 : 0x4000);
+		clearColors = null;
 	}
 
 	public static void glClear(int mask) {
@@ -2108,13 +2314,13 @@ public final class MGL {
 		int[] draw = new int[Math.min(n, 8)];
 		for (int i = 0; i < draw.length; i++) {
 			int b = buffers.get(buffers.position() + i);
-			draw[i] = b >= 0x8CE0 && b < 0x8CE8 ? b - 0x8CE0 : -1;
+			draw[i] = b >= 0x8CE0 && b < 0x8CF0 ? b - 0x8CE0 : -1;
 		}
 		setDrawBuffers(draw);
 	}
 
 	public static void glDrawBuffers(int buffer) {
-		setDrawBuffers(new int[] {buffer >= 0x8CE0 && buffer < 0x8CE8 ? buffer - 0x8CE0 : -1});
+		setDrawBuffers(new int[] {buffer >= 0x8CE0 && buffer < 0x8CF0 ? buffer - 0x8CE0 : -1});
 	}
 
 	private static void setDrawBuffers(int[] draw) {
@@ -2131,7 +2337,7 @@ public final class MGL {
 
 	public static void glReadBuffer(int mode) {
 		Fbo f = fbos.get(readFb);
-		if (f != null && mode >= 0x8CE0 && mode < 0x8CE8) {
+		if (f != null && mode >= 0x8CE0 && mode < 0x8CF0) {
 			f.read = mode - 0x8CE0;
 		}
 	}
@@ -2205,6 +2411,10 @@ public final class MGL {
 			case 0x8B49: case 0x8B4A: return 4096; // fragment / vertex uniform components
 			case 0x88FF: return 2048; // GL_MAX_ARRAY_TEXTURE_LAYERS
 			case 0x8CDF: case 0x8824: return 8; // GL_MAX_COLOR_ATTACHMENTS, GL_MAX_DRAW_BUFFERS
+			case 0x84E0: return 0x84C0 + unit; // GL_ACTIVE_TEXTURE
+			case 0x8CA6: return drawFb; // GL_DRAW_FRAMEBUFFER_BINDING
+			case 0x8CAA: return readFb; // GL_READ_FRAMEBUFFER_BINDING
+			case 0x8B8D: return Programs.current != null ? Programs.current.id : 0; // GL_CURRENT_PROGRAM
 			default:
 				unsupported("glGetInteger 0x" + Integer.toHexString(pname));
 				return 0;
@@ -2226,6 +2436,10 @@ public final class MGL {
 			case 0xBA6: m = mvStack[mvTop]; break;
 			case 0xBA7: m = prStack[prTop]; break;
 			case 0xBA8: m = texStack[fx()][texTop[fx()]]; break;
+			case 0xC22: // GL_COLOR_CLEAR_VALUE
+				out.put(out.position(), (float)clearR).put(out.position() + 1, (float)clearG).put(out.position() + 2, (float)clearB)
+					.put(out.position() + 3, (float)clearA);
+				return;
 			default:
 				warnOnce("glGetFloat 0x" + Integer.toHexString(pname));
 				return;
@@ -2844,6 +3058,7 @@ public final class MGL {
 			case 0x813D: t.maxLevel = param; break;
 			case 0x884C: t.compareMode = param; t.compareSampler = 0L; return; // GL_TEXTURE_COMPARE_MODE
 			case 0x884D: t.compareFunc = param; t.compareSampler = 0L; return; // GL_TEXTURE_COMPARE_FUNC
+			case 0x84FE: t.aniso = Integer.highestOneBit(Math.max(1, Math.min(16, param))); t.compareSampler = 0L; break; // GL_TEXTURE_MAX_ANISOTROPY
 			default: return;
 		}
 		t.sampler = 0L;
@@ -3006,6 +3221,9 @@ public final class MGL {
 		if (scaledFor >= 0 && fb == scaledFor) {
 			fb = SCALED_FB; // render scale: the world draws into the smaller framebuffer
 		}
+		if (dev.graft.legacy.shaders.ShaderPipeline.active && fb == dev.graft.legacy.shaders.ShaderPipeline.mainFb) {
+			fb = dev.graft.legacy.shaders.ShaderPipeline.gbufferFb; // shader pack: the world draws into the gbuffers
+		}
 		if (target != 0x8CA8) {
 			drawFb = fb;
 		}
@@ -3032,7 +3250,7 @@ public final class MGL {
 		if (f == null || fb == SCALED_FB) { // render scale: the stand-in keeps its own (smaller) attachments
 			return;
 		}
-		if (attachment >= 0x8CE0 && attachment < 0x8CE8) {
+		if (attachment >= 0x8CE0 && attachment < 0x8CF0) {
 			f.color[attachment - 0x8CE0] = texture;
 		} else if (attachment == 0x8D00 || attachment == 0x821A) {
 			f.depthTex = texture;

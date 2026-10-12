@@ -194,8 +194,7 @@ public final class GlShaders {
 		for (String line : source.split("\n")) {
 			Matcher m = depth == 0 ? LOOSE.matcher(line) : null;
 			if (m != null && m.matches() && !m.group(1).contains("sampler") && !m.group(1).contains("image")) {
-				// std140 has no bool: GL bools are 4-byte ints there, set through glUniform1i.
-				String type = m.group(1).equals("bool") ? "bool" : m.group(1);
+				String type = m.group(1);
 				into.putIfAbsent(m.group(2), type + " " + m.group(2) + (m.group(3) != null ? m.group(3) : "") + ";");
 			}
 			depth += count(line, '{') - count(line, '}');

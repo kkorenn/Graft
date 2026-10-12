@@ -1,5 +1,7 @@
 package dev.graft.legacy;
 
+import dev.graft.legacy.shaders.ShaderPipeline;
+import dev.graft.legacy.shaders.TerrainFormat;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.SettableFuture;
@@ -13,6 +15,8 @@ import net.minecraft.util.math.BlockPos;
 import net.minecraft.util.BlockRenderLayer;
 
 import java.lang.reflect.Field;
+import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.IdentityHashMap;
 import java.util.List;
 
@@ -49,8 +53,11 @@ public final class Terrain {
 
 	public static ListenableFuture<Object> upload(final BlockRenderLayer layer, final BufferBuilder wr, final RenderChunk chunk, CompiledChunk compiled, double distanceSq) {
 		Minecraft mc = Minecraft.getMinecraft();
+		// shader pack: the shader vertex layout is built and uploaded here, on the chunk worker
+		final int n = wr.getVertexCount();
+		final long ext = ShaderPipeline.extendedTerrain && n > 0 && wr.getVertexFormat().getSize() == TerrainFormat.VANILLA ? extend(wr, n) : 0L;
 		if (mc.isCallingFromMinecraftThread()) {
-			store(layer, wr, chunk);
+			store(layer, wr, chunk, ext, n);
 			return Futures.immediateFuture(null);
 		}
 		// Our own future: the chunk worker cancels stale uploads, and a cancelled task in Minecraft's queue would crash Util.runTask.
@@ -59,15 +66,30 @@ public final class Terrain {
 			@Override
 			public void run() {
 				if (!done.isCancelled()) {
-					store(layer, wr, chunk);
+					store(layer, wr, chunk, ext, n);
 					done.set(null);
+				} else {
+					MGL.releaseBuffer(ext);
 				}
 			}
 		});
 		return done;
 	}
 
-	private static void store(BlockRenderLayer layer, BufferBuilder wr, RenderChunk chunk) {
+	private static final ThreadLocal<ByteBuffer> scratch = new ThreadLocal<ByteBuffer>();
+
+	/** Vanilla chunk vertices -> a Metal buffer in the shader layout (any thread; one scratch buffer per worker). */
+	private static long extend(BufferBuilder wr, int n) {
+		ByteBuffer dst = scratch.get();
+		if (dst == null || dst.capacity() < n * TerrainFormat.SHADER) {
+			dst = ByteBuffer.allocateDirect(Math.max(n * TerrainFormat.SHADER, 1 << 20)).order(ByteOrder.nativeOrder());
+			scratch.set(dst);
+		}
+		TerrainFormat.extend(wr.getByteBuffer(), dst, n);
+		return MGL.newBufferAnyThread(dst, (long)n * TerrainFormat.SHADER);
+	}
+
+	private static void store(BlockRenderLayer layer, BufferBuilder wr, RenderChunk chunk, long ext, int extCount) {
 		long[] b = buffers.get(chunk);
 		int[] c = counts.get(chunk);
 		if (b == null) {
@@ -79,6 +101,12 @@ public final class Terrain {
 		MGL.releaseBuffer(b[i]);
 		b[i] = 0L;
 		c[i] = 0;
+		if (ext != 0L) {
+			b[i] = ext;
+			c[i] = extCount;
+			strides.get(chunk)[i] = TerrainFormat.SHADER;
+			return;
+		}
 		int n = wr.getVertexCount();
 		if (n == 0) {
 			return;
@@ -142,6 +170,46 @@ public final class Terrain {
 			GlStateManager.resetColor();
 		} catch (IllegalAccessException e) {
 			throw new IllegalStateException(e);
+		}
+	}
+
+	/**
+	 * Shader-pack shadow pass: the solid and cutout layers (or the translucent one) of every built chunk the shadow view can
+	 * see, drawn with the current (shadow) matrices relative to the camera at (cx, cy, cz).
+	 */
+	public static void drawShadow(double cx, double cy, double cz, boolean translucent) {
+		int max = buffers.size();
+		if (drawBufs.length < max) {
+			drawBufs = new long[max];
+			drawCounts = new int[max];
+			drawOffs = new float[max * 4];
+		}
+		for (int li = translucent ? 3 : 0; li < (translucent ? 4 : 3); li++) { // SOLID, CUTOUT_MIPPED, CUTOUT | TRANSLUCENT
+			int n = 0, stride = 0;
+			for (java.util.Map.Entry<RenderChunk, long[]> e : buffers.entrySet()) {
+				long b = e.getValue()[li];
+				if (b == 0L) {
+					continue;
+				}
+				int st = strides.get(e.getKey())[li];
+				if (stride == 0) {
+					stride = st;
+				} else if (st != stride) {
+					continue;
+				}
+				BlockPos p = e.getKey().getPosition();
+				double rx = p.getX() - cx, ry = p.getY() - cy, rz = p.getZ() - cz;
+				if (!dev.graft.legacy.shaders.ShaderPipeline.inShadowView(rx + 8, ry + 8, rz + 8)) {
+					continue;
+				}
+				drawBufs[n] = b;
+				drawCounts[n] = counts.get(e.getKey())[li];
+				drawOffs[n * 4] = (float)rx;
+				drawOffs[n * 4 + 1] = (float)ry;
+				drawOffs[n * 4 + 2] = (float)rz;
+				n++;
+			}
+			MGL.drawTerrain(drawBufs, drawCounts, drawOffs, n, stride);
 		}
 	}
 

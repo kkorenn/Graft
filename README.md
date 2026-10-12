@@ -49,7 +49,7 @@ SPIRV-Cross once).
 - Vertex, fragment, compute and tessellation shaders (GLSL → SPIR-V → MSL via SPIRV-Cross)
 - Direct, multi-draw (interleaved and separate) and indirect draws
 - Triangle fans and geometry emulation
-- No native libraries of its own: Objective-C/Metal is called through Java's FFM API
+- Fabric 26.x: no native libraries of its own, Objective-C/Metal is called through Java's FFM API (Forge uses the bundled `libgraft` JNI bridge; 1.21.x bundles LWJGL shaderc/spvc)
 
 ## Mod compatibility
 | Mod | 26.2 | 26.3 | Notes |

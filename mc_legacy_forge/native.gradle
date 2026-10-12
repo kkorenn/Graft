@@ -26,3 +26,32 @@ def compileNative = tasks.register('compileNative', Exec) {
 sourceSets.main.java.srcDir new File(legacy, 'src/main/java')
 sourceSets.main.resources.srcDir new File(legacy, 'src/main/resources')
 sourceSets.main.resources.srcDir(files(nativeOut).builtBy(compileNative))
+
+// Shader-pack compatibility harness (headless): ./gradlew :mc1_8_9:shaderCompat [-Pcompat.pack=BSL] [-Pcompat.program=final]
+sourceSets.test.java.srcDir new File(legacy, 'src/test/java')
+tasks.register('shaderCompat', JavaExec) {
+	dependsOn compileNative
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'dev.graft.legacy.shaders.ShaderCompat'
+	args rootProject.file('build/shaderpacks-test').absolutePath
+	javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(8) }
+	['compat.pack', 'compat.program', 'compat.dump', 'compat.verbose', 'compat.versions', 'compat.runtime'].each { if (project.hasProperty(it)) systemProperty it, project.property(it) }
+}
+
+// Shader transformer on the SRG-named classes the game runs (hooks present + ASM verifier): ./gradlew :mc1_8_9:shaderVerify
+tasks.register('shaderVerify', JavaExec) {
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'dev.graft.legacy.shaders.ShaderVerify'
+	javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(8) }
+	def mc = project.name.substring(2).replace('_', '.')
+	ext.srgJar = { fileTree(new File(gradle.gradleUserHomeDir, 'caches/essential-loom/minecraftMaven')).matching { include "**/forge-${mc}-*intermediate-srg*.jar" }.singleFile }
+	ext.hooks = 'beginWorld,endWorld,startSection,endStartSection,clear,skyAngle,renderEntity,renderTileEntity,renderBlock'
+	argumentProviders.add({ [srgJar().absolutePath, hooks] } as CommandLineArgumentProvider)
+}
+
+// Allocation/time microbenchmark of the shader path's hot Java code: ./gradlew :mc1_8_9:shaderBench
+tasks.register('shaderBench', JavaExec) {
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'dev.graft.legacy.shaders.ShaderBench'
+	javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(8) }
+}

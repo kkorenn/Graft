@@ -33,6 +33,11 @@ public final class Programs {
 		String log = "";
 		long vertexFn, fragmentFn;
 		ByteBuffer block;
+		long blockAddr;
+		/** Shader-pack overrides: blend state (MGL.blendState, 0 = off, -1 = GL state) for all / per attachment, alpha test (-1 = GL state, 0 = off). */
+		int blend = -1, alphaFunc = -1;
+		int[] attachBlend;
+		float alphaRef;
 		int[] units;
 		/** Offsets of the compatibility members (MetalGlsl.BUILTIN_MEMBERS order), -1 if absent. */
 		int[] builtins;
@@ -168,6 +173,7 @@ public final class Programs {
 			return;
 		}
 		Program p = (Program)o;
+		p.log = "";
 		String vs = null, fs = null;
 		for (Shader s : p.shaders) {
 			if (s.type == 0x8B31) {
@@ -191,15 +197,32 @@ public final class Programs {
 			MGL.LOG.warn("Graft: could not translate a shader program: {}", l.error.length() > 4000 ? l.error.substring(0, 4000) : l.error);
 			return;
 		}
-		long vfn = MGL.metalFunction(l.vertexMsl, l.vertexEntry), ffn = vfn == 0L ? 0L : MGL.metalFunction(l.fragmentMsl, l.fragmentEntry);
-		if (vfn == 0L || ffn == 0L) {
+		long[] fns = compileFunctions(l);
+		if (fns == null) {
 			p.log = "Graft: Metal rejected the translated shader (see log)";
 			return;
+		}
+		install(p, l, fns[0], fns[1]);
+	}
+
+	private static void install(Program p, MetalGlsl.Linked l, long vfn, long ffn) {
+		if (p.vertexFn != 0L) { // relink: drop the previous functions and every pipeline built from them
+			if (current == p) {
+				MGL.flushBatch();
+			}
+			for (long pipe : p.pipelines.values()) {
+				MGL.releaseObject(pipe);
+			}
+			p.pipelines.clear();
+			MGL.releaseObject(p.vertexFn);
+			MGL.releaseObject(p.fragmentFn);
+			MGL.forgetPipeline();
 		}
 		p.linked = l;
 		p.vertexFn = vfn;
 		p.fragmentFn = ffn;
 		p.block = ByteBuffer.allocateDirect(Math.max(16, l.blockSize)).order(ByteOrder.nativeOrder());
+		p.blockAddr = Objc.address(p.block);
 		p.units = new int[l.samplers.size()];
 		p.builtins = new int[MetalGlsl.BUILTIN_MEMBERS.length];
 		for (int i = 0; i < p.builtins.length; i++) {
@@ -213,6 +236,69 @@ public final class Programs {
 		if (Integer.getInteger("graft.dumpFrame", -1) >= 0) {
 			MGL.LOG.info("Graft: program {} samplers={} block={}", p.id, l.samplers, l.blockSize);
 		}
+	}
+
+	/** The two Metal functions of a translated program ({vertex, fragment}, retained), or null. Safe off the render thread. */
+	public static long[] compileFunctions(MetalGlsl.Linked l) {
+		long pool = Objc.objc_autoreleasePoolPush(); // the shader loader thread has no pool of its own
+		long vfn, ffn;
+		try {
+			vfn = MGL.metalFunction(l.vertexMsl, l.vertexEntry);
+			ffn = vfn == 0L ? 0L : MGL.metalFunction(l.fragmentMsl, l.fragmentEntry);
+		} finally {
+			Objc.objc_autoreleasePoolPop(pool);
+		}
+		if (vfn == 0L || ffn == 0L) {
+			MGL.releaseObject(vfn);
+			return null;
+		}
+		return new long[] {vfn, ffn};
+	}
+
+	/** A program object for an already translated and compiled program (Graft's own shader-pack pipeline). Returns its id. */
+	public static int createProgram(MetalGlsl.Linked l, long[] fns) {
+		int id = glCreateProgramObjectARB();
+		install((Program)objects.get(id), l, fns[0], fns[1]);
+		return id;
+	}
+
+	/** Pipeline states built ahead of time (MGL.prewarm on the loader thread) for a program. */
+	public static void addPipelines(int program, Map<String, Long> pipelines) {
+		Object o = objects.get(program);
+		if (o instanceof Program && pipelines != null) {
+			((Program)o).pipelines.putAll(pipelines);
+		}
+	}
+
+	/** Pack blend.<program>[.<buffer>] / alphaTest.<program> overrides (see Program). */
+	public static void setOverrides(int program, int blend, int[] attachBlend, int alphaFunc, float alphaRef) {
+		Object o = objects.get(program);
+		if (o instanceof Program) {
+			Program p = (Program)o;
+			p.blend = blend;
+			p.attachBlend = attachBlend;
+			p.alphaFunc = alphaFunc;
+			p.alphaRef = alphaRef;
+		}
+	}
+
+	/** Declared GLSL type of a program's uniform ("float", "ivec2", "mat4", ...; "sampler" for samplers), or null. */
+	public static String uniformType(int program, String name) {
+		Object o = objects.get(program);
+		if (!(o instanceof Program) || !((Program)o).ok) {
+			return null;
+		}
+		MetalGlsl.Linked l = ((Program)o).linked;
+		for (String n : new String[] {name, "mc_kw_" + name}) {
+			if (l.samplers.contains(n)) {
+				return "sampler";
+			}
+			Integer m = l.memberIndex.get(n);
+			if (m != null) {
+				return l.members.get(m).type;
+			}
+		}
+		return null;
 	}
 
 	public static void glLinkProgram(int program) {
@@ -400,36 +486,87 @@ public final class Programs {
 		return v;
 	}
 
+	/** Byte offset for one non-array uniform value of n components in the current program, or -1 (no allocation: per-draw path). */
+	private static int slot(int location, int n) {
+		Program p = target(location);
+		if (p == null || location >= SAMPLER_BASE) {
+			return -1;
+		}
+		int at = offset(p, location, 0);
+		return at < 0 || at + n * 4 > p.block.capacity() ? -1 : at;
+	}
+
+	private static void f(int l, int n, float x, float y, float z, float w) {
+		int at = slot(l, n);
+		if (at >= 0) {
+			ByteBuffer b = current.block;
+			b.putFloat(at, x);
+			if (n > 1) {
+				b.putFloat(at + 4, y);
+			}
+			if (n > 2) {
+				b.putFloat(at + 8, z);
+			}
+			if (n > 3) {
+				b.putFloat(at + 12, w);
+			}
+		}
+	}
+
+	private static void i(int l, int n, int x, int y, int z, int w) {
+		if (l >= SAMPLER_BASE) { // sampler: its texture unit
+			Program p = target(l);
+			if (p != null && l - SAMPLER_BASE < p.units.length) {
+				p.units[l - SAMPLER_BASE] = x;
+			}
+			return;
+		}
+		int at = slot(l, n);
+		if (at >= 0) {
+			ByteBuffer b = current.block;
+			b.putInt(at, x);
+			if (n > 1) {
+				b.putInt(at + 4, y);
+			}
+			if (n > 2) {
+				b.putInt(at + 8, z);
+			}
+			if (n > 3) {
+				b.putInt(at + 12, w);
+			}
+		}
+	}
+
 	public static void glUniform1fARB(int l, float x) {
-		floats(l, 1, x);
+		f(l, 1, x, 0, 0, 0);
 	}
 
 	public static void glUniform2fARB(int l, float x, float y) {
-		floats(l, 2, x, y);
+		f(l, 2, x, y, 0, 0);
 	}
 
 	public static void glUniform3fARB(int l, float x, float y, float z) {
-		floats(l, 3, x, y, z);
+		f(l, 3, x, y, z, 0);
 	}
 
 	public static void glUniform4fARB(int l, float x, float y, float z, float w) {
-		floats(l, 4, x, y, z, w);
+		f(l, 4, x, y, z, w);
 	}
 
 	public static void glUniform1iARB(int l, int x) {
-		ints(l, 1, x);
+		i(l, 1, x, 0, 0, 0);
 	}
 
 	public static void glUniform2iARB(int l, int x, int y) {
-		ints(l, 2, x, y);
+		i(l, 2, x, y, 0, 0);
 	}
 
 	public static void glUniform3iARB(int l, int x, int y, int z) {
-		ints(l, 3, x, y, z);
+		i(l, 3, x, y, z, 0);
 	}
 
 	public static void glUniform4iARB(int l, int x, int y, int z, int w) {
-		ints(l, 4, x, y, z, w);
+		i(l, 4, x, y, z, w);
 	}
 
 	public static void glUniform1ARB(int l, FloatBuffer v) {

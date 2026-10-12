@@ -7,5 +7,6 @@ run/
 .DS_Store
 dist/
 devtools/logs/
+*/logs/
 .DS_Store
 libs/

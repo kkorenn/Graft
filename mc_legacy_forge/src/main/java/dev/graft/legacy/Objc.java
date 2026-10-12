@@ -149,7 +149,7 @@ final class Objc {
 
 	// ---- helpers
 
-	private static final Map<String, Long> SELS = new HashMap<String, Long>();
+	private static final Map<String, Long> SELS = new java.util.concurrent.ConcurrentHashMap<String, Long>(); // loader thread and chunk workers too
 
 	static long sel(String name) {
 		Long s = SELS.get(name);

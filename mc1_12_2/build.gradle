@@ -41,3 +41,5 @@ processResources {
 	inputs.property 'version', version
 	filesMatching('mcmod.info') { expand 'version': version }
 }
+
+tasks.named('test') { failOnNoDiscoveredTests = false } // the test source set holds main()-style harnesses, not JUnit tests

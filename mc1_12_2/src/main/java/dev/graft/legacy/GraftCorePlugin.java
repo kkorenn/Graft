@@ -14,7 +14,8 @@ public final class GraftCorePlugin implements IFMLLoadingPlugin {
 		// -Dgraft.disabled=true runs vanilla OpenGL.
 		boolean mac = System.getProperty("os.name", "").toLowerCase().contains("mac");
 		boolean on = mac && !Boolean.getBoolean("graft.disabled");
-		return on || Boolean.getBoolean("graft.bench") ? new String[] {"dev.graft.legacy.GlTransformer"} : new String[0];
+		return on || Boolean.getBoolean("graft.bench") ? new String[] {"dev.graft.legacy.GlTransformer", "dev.graft.legacy.video.VideoTransformer",
+			"dev.graft.legacy.shaders.ShaderTransformer"} : new String[0];
 	}
 
 	@Override

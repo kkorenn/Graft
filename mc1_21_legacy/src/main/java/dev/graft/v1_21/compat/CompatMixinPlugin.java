@@ -12,7 +12,7 @@ public class CompatMixinPlugin implements IMixinConfigPlugin {
 	@Override
 	public boolean shouldApplyMixin(String targetClassName, String mixinClassName) {
 		// -Dgraft.disable=true: plain OpenGL, Sodium must stay untouched.
-		return sodiumSupported() && !Boolean.getBoolean("graft.disable");
+		return sodiumSupported() && !Boolean.getBoolean("graft.disable") && !Boolean.getBoolean("graft.disabled");
 	}
 
 	/** Sodium 0.7.x runs on Metal. Lives here, not in MetalGpuDevice: loading that this early drags in Blaze3D classes other mods mix into. */

@@ -29,6 +29,9 @@ public final class ScaleSlider {
 
 	public ScaleSlider() {
 		MinecraftForge.EVENT_BUS.register(this);
+		if (dev.graft.legacy.video.VideoTransformer.active) {
+			dev.graft.legacy.video.Game.register();
+		}
 	}
 
 	@SubscribeEvent

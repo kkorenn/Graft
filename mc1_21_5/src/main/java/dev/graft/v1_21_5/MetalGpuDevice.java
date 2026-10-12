@@ -50,7 +50,7 @@ public class MetalGpuDevice implements GpuDevice {
 
 	private static boolean disabled() {
 		dev.graft.metal.MetalConfig.load(net.fabricmc.loader.api.FabricLoader.getInstance().getConfigDir().resolve("graft.properties"));
-		if (Boolean.getBoolean("graft.disable")) {
+		if (Boolean.getBoolean("graft.disable") || Boolean.getBoolean("graft.disabled")) {
 			return true;
 		}
 		if (net.fabricmc.loader.api.FabricLoader.getInstance().isModLoaded("sodium")) {

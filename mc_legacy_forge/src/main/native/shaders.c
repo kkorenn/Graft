@@ -9,10 +9,11 @@
 #include <spirv_cross_c.h>
 
 // Binding scheme shared with MetalGlsl.java: set 0 binding 0 = mc_Uniforms (Metal buffer 28), binding 1 = mc_Offsets
-// (buffer 29), binding 2 + i = sampler i (texture i, sampler i).
+// (buffer 29), binding 2 + i = sampler i (texture i, sampler i; from i = BOUND_SAMPLERS on a constexpr sampler instead).
 #define UNIFORM_BUFFER 28
 #define OFFSET_BUFFER 29
 #define MAX_SAMPLERS 32
+#define BOUND_SAMPLERS 15
 
 typedef struct {
 	char *data;
@@ -144,6 +145,15 @@ JNIEXPORT jstring JNICALL Java_dev_graft_legacy_Objc_glslToMsl(JNIEnv *env, jcla
 		b.msl_texture = i;
 		b.msl_sampler = i;
 		spvc_compiler_msl_add_resource_binding(comp, &b);
+		if (i >= BOUND_SAMPLERS) {
+			// Metal has 16 sampler slots per stage: later samplers sample with a linear clamp-to-edge sampler built into the shader
+			spvc_msl_constexpr_sampler cs;
+			spvc_msl_constexpr_sampler_init(&cs);
+			cs.min_filter = SPVC_MSL_SAMPLER_FILTER_LINEAR;
+			cs.mag_filter = SPVC_MSL_SAMPLER_FILTER_LINEAR;
+			cs.s_address = cs.t_address = cs.r_address = SPVC_MSL_SAMPLER_ADDRESS_CLAMP_TO_EDGE;
+			spvc_compiler_msl_remap_constexpr_sampler_by_binding(comp, 0, 2 + i, &cs);
+		}
 	}
 
 	put(&out, "OK\n");

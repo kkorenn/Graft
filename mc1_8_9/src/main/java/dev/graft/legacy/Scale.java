@@ -17,7 +17,7 @@ import java.util.Properties;
  */
 public final class Scale {
 	/** World resolution in percent of the window; below 100 it is upscaled with MetalFX. */
-	static int renderScale = 100;
+	public static int renderScale = 100;
 	private static boolean active;
 
 	private static File file;
@@ -60,7 +60,7 @@ public final class Scale {
 	}
 
 	/** Video Settings slider: applies from the next frame and is saved. */
-	static void set(int percent) {
+	public static void set(int percent) {
 		if (percent == renderScale) {
 			return;
 		}

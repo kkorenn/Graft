@@ -1,9 +1,18 @@
 plugins { id 'java-library' }
 
-// Forge 1.7.10 has no essential-loom support: plain module compiled against Forge/LaunchWrapper/LWJGL 2. Graft's
-// 1.7.10 classes reach Minecraft only by reflection (MCP and SRG names), so no deobfuscated Minecraft is needed.
+// Forge 1.7.10 has no essential-loom support: plain module compiled against Forge/LaunchWrapper/LWJGL 2. Most of Graft's
+// 1.7.10 classes reach Minecraft by reflection (MCP and SRG names); the video settings screens subclass GuiScreen, so the
+// module compiles against the MCP-named forgeBin jar ForgeGradle 1.2 leaves in the Gradle cache and the jar is then
+// reobfuscated to SRG (what FML runs) with SpecialSource and that cache's mcp-srg.srg (as Honeycrisp's 1.7.10 module).
 base.archivesName = 'graft-1.7.10'
 java.toolchain.languageVersion = JavaLanguageVersion.of(8)
+
+def forgeDir = new File(gradle.gradleUserHomeDir, 'caches/minecraft/net/minecraftforge/forge/1.7.10-10.13.4.1614-1.7.10')
+def forgeBin = new File(forgeDir, 'forgeBin-1.7.10-10.13.4.1614-1.7.10.jar')
+def mcpToSrg = new File(forgeDir, 'srgs/mcp-srg.srg')
+if (!forgeBin.file || !mcpToSrg.file) {
+	throw new GradleException("mc1_7_10 needs ${forgeBin} and ${mcpToSrg}: run setupDecompWorkspace once in any ForgeGradle 1.2 1.7.10-10.13.4.1614 project")
+}
 
 repositories {
 	maven { url = 'https://maven.minecraftforge.net/'; metadataSources { mavenPom(); artifact() } }
@@ -11,22 +20,71 @@ repositories {
 	mavenCentral()
 }
 
+configurations { specialSource }
+
 dependencies {
-	compileOnly 'net.minecraftforge:forge:1.7.10-10.13.4.1614-1.7.10:universal@jar'
+	compileOnly files(forgeBin)
 	compileOnly 'net.minecraft:launchwrapper:1.12@jar'
 	compileOnly 'org.lwjgl.lwjgl:lwjgl:2.9.1@jar'
 	compileOnly 'org.ow2.asm:asm-debug-all:5.0.3'
 	compileOnly 'org.apache.logging.log4j:log4j-api:2.0-beta9'
+	specialSource 'net.md-5:SpecialSource:1.11.4:shaded@jar'
+}
+configurations.testImplementation.extendsFrom(configurations.compileOnly)
+// Minecraft's own libraries, for the bytecode verifier of :mc1_7_10:shaderVerify
+dependencies {
+	testRuntimeOnly fileTree(new File(gradle.gradleUserHomeDir, 'caches/modules-2/files-2.1')) {
+		include 'com.google.code.gson/gson/2.2.4/*/gson-2.2.4.jar', 'com.google.guava/guava/17.0/*/guava-17.0.jar'
+	}
 }
 
 apply from: rootProject.file('mc_legacy_forge/native.gradle')
 
 jar {
+	archiveClassifier = 'dev'
 	manifest.attributes(
 		'FMLCorePlugin': 'dev.graft.legacy.GraftCorePlugin',
 		'FMLCorePluginContainsFMLMod': 'true'
 	)
 }
+
+def reobfJar = tasks.register('reobfJar', JavaExec) {
+	def input = jar.archiveFile
+	def output = layout.buildDirectory.file("libs/graft-1.7.10-${project.version}.jar")
+	inputs.file input
+	inputs.file mcpToSrg
+	outputs.file output
+	// --live: Minecraft's class hierarchy (inherited and overridden members) comes from forgeBin on this classpath.
+	classpath = configurations.specialSource + files(forgeBin)
+	mainClass = 'net.md_5.specialsource.SpecialSource'
+	args '--live', '--in-jar', input.get().asFile, '--out-jar', output.get().asFile, '--srg-in', mcpToSrg
+}
+assemble.dependsOn reobfJar
+
+// Options file round trip (no game): ./gradlew :mc1_7_10:videoSettingsTest, also part of check.
+// forgeBin remapped to SRG names (what FML runs), for :mc1_7_10:shaderVerify
+def srgMinecraft = layout.buildDirectory.file('tmp/forgeBin-srg.jar')
+def remapForgeBin = tasks.register('remapForgeBin', JavaExec) {
+	inputs.file forgeBin
+	outputs.file srgMinecraft
+	classpath = configurations.specialSource
+	mainClass = 'net.md_5.specialsource.SpecialSource'
+	args '--in-jar', forgeBin, '--out-jar', srgMinecraft.get().asFile, '--srg-in', mcpToSrg
+}
+tasks.named('shaderVerify') {
+	dependsOn remapForgeBin
+	ext.srgJar = { srgMinecraft.get().asFile }
+	ext.hooks = 'beginWorld,endWorld,startSection,endStartSection,clear,skyAngle,renderEntity,renderTileEntity,tessellatorDraw'
+	systemProperty 'verify.emulateGl', 'true'
+}
+
+def videoSettingsTest = tasks.register('videoSettingsTest', JavaExec) {
+	classpath = sourceSets.test.runtimeClasspath
+	mainClass = 'dev.graft.legacy.video.VideoSettingsTest'
+	javaLauncher = javaToolchains.launcherFor { languageVersion = JavaLanguageVersion.of(8) }
+}
+check.dependsOn videoSettingsTest
+tasks.named('test') { failOnNoDiscoveredTests = false } // the test source set holds main()-style harnesses, not JUnit tests
 
 processResources {
 	def version = project.version
